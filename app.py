@@ -269,6 +269,38 @@ def sec_filings(cik):
     ]
 
 
+US_STATES = set("AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY PR GU VI".split())
+# EDGAR uses short codes for non-US places; these are the ones I am confident about
+SEC_PLACES = {"K3": "Cayman Islands", "F4": "China", "D9": "Hong Kong", "L3": "Israel", "X0": "United Kingdom",
+              "A0": "Canada", "A1": "Canada", "A2": "Canada", "A3": "Canada", "A4": "Canada", "A5": "Canada",
+              "A6": "Canada", "A7": "Canada", "A8": "Canada", "A9": "Canada", "B0": "Canada"}
+
+
+@st.cache_data(ttl=86400)
+def sec_country(ticker):
+    """Country of the company's business address, from SEC filings. Returns text like 'U.S' or None."""
+    if not SEC_UA:
+        return None
+    try:
+        cik = sec_cik_map().get(ticker.upper())
+        if not cik:
+            return None
+        r = requests.get(f"https://data.sec.gov/submissions/CIK{cik:010d}.json", headers={"User-Agent": SEC_UA}, timeout=30)
+        r.raise_for_status()
+        biz = (r.json().get("addresses") or {}).get("business") or {}
+    except Exception:
+        return None
+    code = (biz.get("stateOrCountry") or "").strip().upper()
+    desc = (biz.get("stateOrCountryDescription") or "").strip()
+    if code in US_STATES:
+        return "U.S"
+    if code in SEC_PLACES:
+        return SEC_PLACES[code]
+    if desc and desc.upper() != code:
+        return desc.title()
+    return None
+
+
 def pdate(s):
     return datetime.strptime(s, "%Y-%m-%d").date()
 
@@ -663,6 +695,8 @@ def build_card(ticker, res, info, splits, extras):
     recent = res[-30:]
     d = (info or {}).get("results", {})
     exch = EXCHANGES.get(d.get("primary_exchange"), d.get("primary_exchange", ""))
+    country = (extras or {}).get("country")
+    country_txt = f" &nbsp;•&nbsp; {html.escape(country)}" if country else ""
     shares = d.get("share_class_shares_outstanding") or d.get("weighted_shares_outstanding")
 
     # Float and short interest (loaded in a second step)
@@ -720,7 +754,7 @@ def build_card(ticker, res, info, splits, extras):
         f'<div class="card"><h1>{ticker} - ${last["c"]:.2f} '
         f'<span class="{cls}">({change:+.2f}%)</span></h1>'
         f'<div class="mute">{html.escape(d.get("name", ""))}</div>'
-        f'<div class="mute">{html.escape(exch)}</div>'
+        f'<div class="mute">{html.escape(exch)}{country_txt}</div>'
         f'{flags_html(d, extras)}'
         f'<p class="desc">{html.escape(d.get("description", "")[:220])}</p><hr>'
         f'<div class="grid">{cells}</div><hr>'
@@ -758,5 +792,6 @@ if ticker:
             }
             extras["risk"] = risk_metrics(ticker, extras["cash"], splits)
             extras["own"] = finviz_own(ticker)
+            extras["country"] = sec_country(ticker)
             extras["flags"] = reg_flags(ticker, (info or {}).get("results", {}).get("primary_exchange"))
         box.markdown(build_card(ticker, res, info, splits, extras), unsafe_allow_html=True)
