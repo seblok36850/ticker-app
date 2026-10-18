@@ -821,7 +821,7 @@ def dilution_panel(ticker, cash, risk, splits, today=None):
 
 
 def dilution_html(extras):
-    head = '<div class="sec">Dilution Risk Rating</div>'
+    head = ""
     if extras is None:
         return head + '<div class="mute">Loading…</div>'
     d = extras.get("dilution") or {}
