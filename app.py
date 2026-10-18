@@ -9,6 +9,8 @@ st.set_page_config(page_title="Ticker lookup", layout="centered")
 BASE = "https://api.massive.com"
 HEADERS = {"Authorization": f"Bearer {st.secrets['MASSIVE_API_KEY']}"}
 EXCHANGES = {"XNAS": "NASDAQ", "XNYS": "NYSE", "XASE": "NYSE American"}
+BUCKETS = [(0, 10), (10, 30), (30, 50), (50, 80), (80, 250), (250, 800)]
+LOOKBACK_DAYS = 427
 
 st.markdown(
     """<style>
@@ -23,6 +25,12 @@ st.markdown(
     .sec{color:#6db3f2;font-size:21px;font-weight:500;margin:0 0 4px}
     .chart{border:1px solid #2a2e36;border-radius:10px;padding:6px 8px;margin-top:6px}
     .chart span{font-size:12px;color:#9aa1ad}
+    .chart .r{float:right}
+    .tbl{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
+    .tbl th{background:#444a54;font-weight:500;padding:3px;color:#f1f3f6}
+    .tbl td{padding:3px 4px;text-align:center;border:1px solid #2a2e36;color:#f1f3f6}
+    .tbl td:first-child{text-align:left}
+    .tbl tr.hl td{background:#1d2d44}
     label, .stTextInput label p{color:#9aa1ad !important}
     </style>""",
     unsafe_allow_html=True,
@@ -52,6 +60,10 @@ def short(n):
     return f"{n:.0f}"
 
 
+def pct(v):
+    return f"{v:.1f}%" if abs(v) >= 10 else f"{v:.2f}%"
+
+
 def chart_svg(closes):
     w, h, pad = 390, 130, 8
     hi = max(closes) or 1
@@ -72,6 +84,25 @@ def chart_svg(closes):
     )
 
 
+def gap_svg(values, avg):
+    w, h, pad = 390, 100, 6
+    hi = max(values) or 1
+    n = max(len(values) - 1, 1)
+    pts = [(i / n * w, h - pad - v / hi * (h - 2 * pad)) for i, v in enumerate(values)]
+    line = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+    grid = ""
+    for frac in (0, 0.5, 1):
+        y = h - pad - frac * (h - 2 * pad)
+        grid += f'<line x1="0" x2="{w}" y1="{y:.1f}" y2="{y:.1f}" stroke="#2a2e36" stroke-width="1"/>'
+        grid += f'<text x="{w + 6}" y="{y + 4:.1f}" fill="#9aa1ad" font-size="11">{hi * frac:.0f}%</text>'
+    ay = h - pad - avg / hi * (h - 2 * pad)
+    grid += f'<line x1="0" x2="{w}" y1="{ay:.1f}" y2="{ay:.1f}" stroke="#e0a050" stroke-width="1" stroke-dasharray="4 3"/>'
+    return (
+        f'<svg viewBox="0 0 {w + 50} {h}" style="width:100%;display:block">{grid}'
+        f'<polyline fill="none" stroke="#6db3f2" stroke-width="1.2" points="{line}"/></svg>'
+    )
+
+
 def split_text(s):
     a, b = s.get("split_from"), s.get("split_to")
     if a is None or b is None:
@@ -83,10 +114,62 @@ def split_text(s):
     return f"{ratio} {kind} on {s.get('execution_date', '')}"
 
 
+def gap_analysis(res, up):
+    """For every day: gap = open vs. previous close. Keep days gapping in the chosen direction."""
+    stats, series = [], []
+    for prev_bar, bar in zip(res, res[1:]):
+        p, o, c = prev_bar["c"], bar["o"], bar["c"]
+        if not p or not o:
+            series.append(0)
+            continue
+        g = (o - p) / p * 100
+        if (g <= 0) if up else (g >= 0):
+            series.append(0)
+            continue
+        edge = bar["h"] if up else bar["l"]
+        stats.append((abs(g), (c - o) / o * 100, (edge - o) / o * 100))
+        series.append(abs(g))
+    return stats, series
+
+
+def bucket_label(mag):
+    for lo, hi in BUCKETS:
+        if lo <= mag < hi:
+            return f"{lo}%-{hi}%"
+    return "outside ranges"
+
+
+def gap_table(stats, today_mag, up):
+    def cc(v):
+        return "up" if v > 0 else "down"
+
+    rows = ""
+    for lo, hi in BUCKETS:
+        items = [s for s in stats if lo <= s[0] < hi]
+        hl = ' class="hl"' if lo <= today_mag < hi else ""
+        if items:
+            n = len(items)
+            ga = sum(s[0] for s in items) / n
+            oc = sum(s[1] for s in items) / n
+            ex = sum(s[2] for s in items) / n
+            cells = (
+                f"<td>{pct(ga)}</td><td class='{cc(oc)}'>{pct(oc)}</td>"
+                f"<td class='{cc(ex)}'>{pct(ex)}</td><td>{n}</td>"
+            )
+        else:
+            cells = "<td>—</td><td>—</td><td>—</td><td>0</td>"
+        rows += f"<tr{hl}><td>{lo}%-{hi}%</td>{cells}</tr>"
+    extreme = "HoD" if up else "LoD"
+    return (
+        f'<table class="tbl"><tr><th>Range</th><th>Gap Avg</th><th>O-C Avg</th>'
+        f"<th>{extreme}</th><th>Freq</th></tr>{rows}</table>"
+    )
+
+
 ticker = st.text_input("Ticker", value="AMOD", max_chars=6).strip().upper()
 
 if ticker:
-    start = date.today() - timedelta(days=365)
+    start = date.today() - timedelta(days=LOOKBACK_DAYS)
     bars = get(f"/v2/aggs/ticker/{ticker}/range/1/day/{start}/{date.today()}?adjusted=true&sort=asc&limit=5000")
     info = get(f"/v3/reference/tickers/{ticker}")
     splits = get(f"/v3/reference/splits?ticker={ticker}&order=desc&limit=3")
@@ -97,6 +180,8 @@ if ticker:
         res = bars["results"]
         last, prev = res[-1], res[-2]
         change = (last["c"] - prev["c"]) / prev["c"] * 100
+        open_gap = (last["o"] - prev["c"]) / prev["c"] * 100
+        up = change >= 0
         recent = res[-30:]
         d = (info or {}).get("results", {})
         exch = EXCHANGES.get(d.get("primary_exchange"), d.get("primary_exchange", ""))
@@ -108,7 +193,28 @@ if ticker:
             ("Vol Avg.", short(sum(b["v"] for b in recent) / len(recent))),
         ]
         cells = "".join(f"<div><small>{k}</small><b>{v}</b></div>" for k, v in stats)
-        cls = "up" if change >= 0 else "down"
+        cls = "up" if up else "down"
+
+        # Gap analysis
+        direction = "Gap Up" if up else "Gap Down"
+        gstats, gseries = gap_analysis(res, up)
+        gap_head = (
+            f'<div class="mute" style="font-size:12px">Today {change:+.1f}% ({bucket_label(abs(change))})'
+            f" · open {open_gap:+.1f}% · {direction} · {LOOKBACK_DAYS}d lookback</div>"
+        )
+        if gstats:
+            avg = sum(s[0] for s in gstats) / len(gstats)
+            last_gap = gstats[-1][0]
+            gap_html = (
+                gap_head
+                + gap_table(gstats, abs(change), up)
+                + f'<div class="chart"><span>{direction} history (n={len(gstats)})</span>'
+                + f'<span class="r">last {pct(last_gap)} &nbsp; avg {pct(avg)}</span>'
+                + gap_svg(gseries, avg)
+                + "</div>"
+            )
+        else:
+            gap_html = gap_head + '<div class="mute">No gap history in the lookback period.</div>'
 
         split_lines = [t for t in (split_text(s) for s in (splits or {}).get("results", [])) if t]
         split_html = "".join(f"<div>• {html.escape(t)}</div>" for t in split_lines) or '<div class="mute">No recent splits.</div>'
@@ -120,7 +226,8 @@ if ticker:
             f'<div class="mute">{html.escape(exch)}</div>'
             f'<p class="desc">{html.escape(d.get("description", "")[:220])}</p><hr>'
             f'<div class="grid">{cells}</div><hr>'
+            f'<div class="sec">Gap Analysis · {direction}</div>{gap_html}<hr>'
             f'<div class="sec">Recent Splits</div>{split_html}<hr>'
-            f'<div class="chart"><span>Daily 1Y</span>{chart_svg([b["c"] for b in res])}</div></div>'
+            f'<div class="chart"><span>Daily 1Y</span>{chart_svg([b["c"] for b in res[-252:]])}</div></div>'
         )
         st.markdown(card, unsafe_allow_html=True)
