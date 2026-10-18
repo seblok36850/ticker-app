@@ -1,4 +1,6 @@
+import csv
 import html
+import io
 import time
 from datetime import date, datetime, timedelta
 
@@ -19,6 +21,11 @@ OCF_TAGS = ["NetCashProvidedByUsedInOperatingActivities", "NetCashProvidedByUsed
 SHARE_TAGS = ["EntityCommonStockSharesOutstanding"]  # share count on the cover of each 10-Q / 10-K
 WARRANT_TAGS = ["ClassOfWarrantOrRightOutstanding"]
 OFFERING_FORMS = ("424B", "S-1", "S-3", "F-1", "F-3")  # prospectuses and registration statements
+
+NASDAQ_FILES = {
+    "th": "https://www.nasdaqtrader.com/dynamic/symdir/regsho/nasdaqth{d}.txt",     # Reg SHO threshold list (pipe-separated)
+    "sh": "https://www.nasdaqtrader.com/dynamic/symdir/shorthalts/shorthalts{d}.txt",  # short sale circuit breaker list (comma-separated)
+}
 
 # Risk rating rules. Change these numbers to change how the badges are scored.
 RULES = {
@@ -52,6 +59,7 @@ st.markdown(
     .tbl td{padding:3px 4px;text-align:center;border:1px solid #2a2e36;color:#f1f3f6}
     .tbl td:first-child{text-align:left}
     .tbl tr.hl td{background:#1d2d44}
+    .flags{font-size:14px;color:#9aa1ad;margin-top:2px}
     .note{color:#6f7682;font-size:11px;line-height:1.3;margin-top:8px}
     .badges{display:flex;gap:12px;flex-wrap:wrap}
     .badges small{display:block;color:#9aa1ad;font-size:12px;margin-bottom:2px}
@@ -345,6 +353,95 @@ def cash_metrics(ticker):
     return {"cash": cash, "cash_end": cash_end, "burn": burn, "basis": basis, "months": months}
 
 
+@st.cache_data(ttl=3600)
+def nasdaq_file(kind, day):
+    """Download one daily Nasdaq Trader list. Returns its text, or None if no file exists for that day.
+    Network problems raise an error (so they are not remembered)."""
+    r = requests.get(NASDAQ_FILES[kind].format(d=day), headers={"User-Agent": "Mozilla/5.0 (TickerApp)"}, timeout=12)
+    if r.status_code == 404:
+        return None
+    r.raise_for_status()
+    return r.text
+
+
+def latest_file(kind, today):
+    """The newest available daily file, looking back up to a week: (date, text) or None."""
+    for i in range(8):
+        day = today - timedelta(days=i)
+        if day.weekday() >= 5:
+            continue
+        text = nasdaq_file(kind, day.strftime("%Y%m%d"))
+        if text:
+            return day, text
+    return None
+
+
+def ssr_days(today):
+    """Trading days whose circuit-breaker triggers are in effect today (a trigger lasts the rest of that day and the next day)."""
+    def prev_weekday(d):
+        d -= timedelta(days=1)
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+        return d
+    if today.weekday() >= 5:
+        return [prev_weekday(today + timedelta(days=1))]  # weekend: only Friday's triggers reach Monday
+    return [today, prev_weekday(today)]
+
+
+def reg_flags(ticker, exchange_code, today=None):
+    """Reg SHO threshold flag and SSR flag as "Yes" / "No" / None (unknown)."""
+    today = today or date.today()
+    out = {"reg_sho": None, "ssr": None, "ssr_note": ""}
+    # Reg SHO: Nasdaq's list only covers Nasdaq-listed securities
+    if exchange_code == "XNAS":
+        try:
+            found = latest_file("th", today)
+        except requests.RequestException:
+            found = None
+        if found:
+            symbols = {line.split("|")[0].strip().upper() for line in found[1].splitlines()[1:] if "|" in line}
+            out["reg_sho"] = "Yes" if ticker in symbols else "No"
+    # SSR
+    try:
+        hit, seen = None, 0
+        for day in ssr_days(today):
+            if day.weekday() >= 5:
+                continue
+            text = nasdaq_file("sh", day.strftime("%Y%m%d"))
+            if text is None:
+                continue
+            seen += 1
+            for row in csv.reader(io.StringIO(text)):
+                if len(row) >= 4 and row[0].strip().upper() == ticker:
+                    hit = (day, row[3].strip())
+        if hit:
+            out["ssr"], out["ssr_note"] = "Yes", f"SSR triggered {hit[1]}"
+        elif seen:
+            out["ssr"] = "No"
+    except requests.RequestException:
+        pass
+    return out
+
+
+def flags_html(d, extras):
+    def cell(label, value, warn=True):
+        if value is None:
+            return f'{label}: <span class="mute">N/A</span>'
+        if not warn:  # ADR is informational, not a warning
+            return f'{label}: <span class="mute">{value}</span>'
+        return f'{label}: <span class="{"down" if value == "Yes" else "up"}">{value}</span>'
+
+    typ = d.get("type")
+    adr = None if not typ else ("Yes" if str(typ).startswith("ADR") else "No")
+    if extras is None:
+        return f'<div class="flags">{cell("ADR", adr, warn=False)} &nbsp;•&nbsp; Reg SHO: … &nbsp;•&nbsp; SSR: …</div>'
+    f = extras.get("flags") or {}
+    return (
+        f'<div class="flags">{cell("ADR", adr, warn=False)} &nbsp;•&nbsp; {cell("Reg SHO", f.get("reg_sho"))}'
+        f' &nbsp;•&nbsp; {cell("SSR", f.get("ssr"))}</div>'
+    )
+
+
 def split_factor(date_str, splits):
     """Multiply a share count reported on date_str to put it on today's (post-split) basis."""
     f = 1.0
@@ -581,6 +678,7 @@ def build_card(ticker, res, info, splits, extras):
         f'<span class="{cls}">({change:+.2f}%)</span></h1>'
         f'<div class="mute">{html.escape(d.get("name", ""))}</div>'
         f'<div class="mute">{html.escape(exch)}</div>'
+        f'{flags_html(d, extras)}'
         f'<p class="desc">{html.escape(d.get("description", "")[:220])}</p><hr>'
         f'<div class="grid">{cells}</div><hr>'
         f'<div class="sec">Dilution &amp; Risk Ratings</div>{risk_html(extras)}<hr>'
@@ -607,7 +705,7 @@ if ticker:
         box = st.empty()
         box.markdown(build_card(ticker, res, info, splits, None), unsafe_allow_html=True)
 
-        with st.spinner("Loading float, short interest, news, cash and risk data (the free plan allows 5 requests a minute, so this can take up to a minute)..."):
+        with st.spinner("Loading float, short interest, news, cash, risk and short-sale flags (the free plan allows 5 requests a minute, so this can take up to a minute)..."):
             extras = {
                 "float": get(f"/stocks/vX/float?ticker={ticker}"),
                 "short": get(f"/stocks/v1/short-interest?ticker={ticker}&sort=settlement_date.desc&limit=1"),
@@ -615,4 +713,5 @@ if ticker:
                 "cash": cash_metrics(ticker),
             }
             extras["risk"] = risk_metrics(ticker, extras["cash"], splits)
+            extras["flags"] = reg_flags(ticker, (info or {}).get("results", {}).get("primary_exchange"))
         box.markdown(build_card(ticker, res, info, splits, extras), unsafe_allow_html=True)
