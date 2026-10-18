@@ -941,12 +941,13 @@ def build_card(ticker, res, info, splits, extras):
         f'<p class="desc">{html.escape(d.get("description", "")[:220])}</p><hr>'
         f'<div class="grid">{cells}</div><hr>'
         f'<div class="sec">Dilution &amp; Risk Ratings</div>{risk_html(extras)}<hr>'
+        f'{dilution_html(extras)}<hr>'
         f'<div class="sec">Gap Analysis · {direction}</div>{gap_html}<hr>'
         f'{cash_html(extras)}<hr>'
         f'<div class="sec">Latest News</div>{news_html(extras)}<hr>'
         f'<div class="sec">Recent Splits</div>{split_html}<hr>'
         f'<div class="chart"><span>Daily 1Y</span>{chart_svg([b["c"] for b in res[-252:]])}</div>'
-        f'<hr>{dilution_html(extras)}</div>'
+        f'</div>'
     )
 
 
