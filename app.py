@@ -615,6 +615,33 @@ def news_html(extras):
     return out
 
 
+def finviz_own(ticker):
+    """Best effort: Inst Own and Insider Own from the Finviz quote page. Returns {} if blocked or changed."""
+    try:
+        r = requests.get(
+            f"https://finviz.com/quote.ashx?t={ticker}",
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                     "Accept-Language": "en-US,en;q=0.9"},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return {}
+        text = r.text
+    except Exception:
+        return {}
+    import re
+    out = {}
+    for key, label in (("inst", "Inst Own"), ("insider", "Insider Own")):
+        m = re.search(re.escape(label) + r"</a></td>\s*<td[^>]*>(.*?)</td>", text, re.S)
+        if not m:
+            m = re.search(re.escape(label) + r".{0,200}?<b>(.*?)</b>", text, re.S)
+        if m:
+            v = re.sub(r"<[^>]+>", "", m.group(1)).strip()
+            if re.fullmatch(r"-?[\d.,]+%", v):
+                out[key] = v
+    return out
+
+
 def build_card(ticker, res, info, splits, extras):
     last, prev = res[-1], res[-2]
     change = (last["c"] - prev["c"]) / prev["c"] * 100
@@ -627,8 +654,10 @@ def build_card(ticker, res, info, splits, extras):
     shares = d.get("share_class_shares_outstanding") or d.get("weighted_shares_outstanding")
 
     # Float and short interest (loaded in a second step)
+    own = (extras or {}).get("own") or {}
     if extras is None:
         float_txt = short_txt = "…"
+        own = {"inst": "…", "insider": "…"}
     else:
         fl = first(extras.get("float")).get("free_float")
         si = first(extras.get("short")).get("short_interest")
@@ -645,6 +674,8 @@ def build_card(ticker, res, info, splits, extras):
         ("Market Cap", short(d.get("market_cap"))),
         ("Float", float_txt),
         ("OS", short(shares)),
+        ("Inst. Own", own.get("inst", "N/A")),
+        ("Insider Own", own.get("insider", "N/A")),
         ("Short Interest", short_txt),
         ("Vol Avg.", short(sum(b["v"] for b in recent) / len(recent))),
     ]
@@ -713,5 +744,6 @@ if ticker:
                 "cash": cash_metrics(ticker),
             }
             extras["risk"] = risk_metrics(ticker, extras["cash"], splits)
+            extras["own"] = finviz_own(ticker)
             extras["flags"] = reg_flags(ticker, (info or {}).get("results", {}).get("primary_exchange"))
         box.markdown(build_card(ticker, res, info, splits, extras), unsafe_allow_html=True)
