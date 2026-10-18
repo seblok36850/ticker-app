@@ -16,6 +16,22 @@ SEC_UA = st.secrets.get("SEC_USER_AGENT", "")  # e.g. "TickerApp you@example.com
 CASH_TAGS = ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents", "Cash"]
 INVEST_TAGS = ["ShortTermInvestments", "MarketableSecuritiesCurrent", "AvailableForSaleSecuritiesDebtSecuritiesCurrent"]
 OCF_TAGS = ["NetCashProvidedByUsedInOperatingActivities", "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"]
+SHARE_TAGS = ["EntityCommonStockSharesOutstanding"]  # share count on the cover of each 10-Q / 10-K
+WARRANT_TAGS = ["ClassOfWarrantOrRightOutstanding"]
+OFFERING_FORMS = ("424B", "S-1", "S-3", "F-1", "F-3")  # prospectuses and registration statements
+
+# Risk rating rules. Change these numbers to change how the badges are scored.
+RULES = {
+    "recent_days": 90,        # Offering = High if an offering filing appeared within this many days
+    "freq_high": 4,           # Frequency = High at this many prospectus filings in 12 months...
+    "freq_med": 2,            # ...Medium at this many
+    "dilution_high": 0.50,    # Dilution = High if share count grew this much in a year (split-adjusted)
+    "dilution_med": 0.15,
+    "warrants_high": 0.50,    # Warrants = High if outstanding warrants are this share of shares outstanding
+    "warrants_med": 0.20,
+    "cash_months_high": 6,    # Cash Need = High if fewer than this many months of cash are left
+    "cash_months_med": 12,
+}
 
 st.markdown(
     """<style>
@@ -37,6 +53,10 @@ st.markdown(
     .tbl td:first-child{text-align:left}
     .tbl tr.hl td{background:#1d2d44}
     .note{color:#6f7682;font-size:11px;line-height:1.3;margin-top:8px}
+    .badges{display:flex;gap:12px;flex-wrap:wrap}
+    .badges small{display:block;color:#9aa1ad;font-size:12px;margin-bottom:2px}
+    .b{display:inline-block;padding:1px 8px;border-radius:5px;font-size:13px;color:#111}
+    .b.med{background:#f2c27a}.b.high{background:#8c2340;color:#fff}.b.low{background:#a9dcb0}.b.na{background:#3a3f48;color:#9aa1ad}
     .news{margin:6px 0;font-size:14px;line-height:1.3}
     .news a{color:#9cc9f5;text-decoration:none}
     label, .stTextInput label p{color:#9aa1ad !important}
@@ -140,9 +160,9 @@ def split_text(s):
 
 
 def get_splits(ticker):
-    data = get(f"/stocks/v1/splits?ticker={ticker}&limit=3")
+    data = get(f"/stocks/v1/splits?ticker={ticker}&limit=10")
     if data is None:  # fall back to the older endpoint
-        data = get(f"/v3/reference/splits?ticker={ticker}&order=desc&limit=3")
+        data = get(f"/v3/reference/splits?ticker={ticker}&order=desc&limit=10")
     return data
 
 
@@ -210,16 +230,35 @@ def sec_facts(cik):
     """Download a company's SEC filing data, keeping only the few items we need."""
     r = requests.get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json", headers={"User-Agent": SEC_UA}, timeout=30)
     r.raise_for_status()
-    gaap = r.json().get("facts", {}).get("us-gaap", {})
+    all_facts = r.json().get("facts", {})
     keep = {}
-    for tag in CASH_TAGS + INVEST_TAGS + OCF_TAGS:
-        rows = gaap.get(tag, {}).get("units", {}).get("USD", [])
-        keep[tag] = [
-            {"start": f.get("start"), "end": f["end"], "val": f["val"], "filed": f.get("filed", ""), "form": f.get("form", "")}
-            for f in rows
-            if str(f.get("form", "")).startswith(("10-K", "10-Q"))
-        ]
+
+    def collect(taxonomy, tags, unit):
+        for tag in tags:
+            rows = all_facts.get(taxonomy, {}).get(tag, {}).get("units", {}).get(unit, [])
+            keep[tag] = [
+                {"start": f.get("start"), "end": f["end"], "val": f["val"], "filed": f.get("filed", ""), "form": f.get("form", "")}
+                for f in rows
+                if str(f.get("form", "")).startswith(("10-K", "10-Q"))
+            ]
+
+    collect("us-gaap", CASH_TAGS + INVEST_TAGS + OCF_TAGS, "USD")
+    collect("us-gaap", WARRANT_TAGS, "shares")
+    collect("dei", SHARE_TAGS, "shares")
     return keep
+
+
+@st.cache_data(ttl=3600)
+def sec_filings(cik):
+    """Recent offering-related filings: a list of (form, filing date)."""
+    r = requests.get(f"https://data.sec.gov/submissions/CIK{cik:010d}.json", headers={"User-Agent": SEC_UA}, timeout=30)
+    r.raise_for_status()
+    recent = r.json().get("filings", {}).get("recent", {})
+    cutoff = (date.today() - timedelta(days=400)).isoformat()
+    return [
+        (f, d) for f, d in zip(recent.get("form", []), recent.get("filingDate", []))
+        if d >= cutoff and f.startswith(OFFERING_FORMS)
+    ]
 
 
 def pdate(s):
@@ -304,6 +343,122 @@ def cash_metrics(ticker):
     burn, basis = (ocf[0], ocf[2]) if ocf else (None, None)
     months = cash / (-burn / 3) if (cash is not None and burn is not None and burn < 0) else None
     return {"cash": cash, "cash_end": cash_end, "burn": burn, "basis": basis, "months": months}
+
+
+def split_factor(date_str, splits):
+    """Multiply a share count reported on date_str to put it on today's (post-split) basis."""
+    f = 1.0
+    for s in (splits or {}).get("results", []):
+        a, b, d = s.get("split_from"), s.get("split_to"), s.get("execution_date")
+        if a and b and d and d > date_str:
+            f *= b / a
+    return f
+
+
+def share_growth(facts, splits):
+    """Change in shares outstanding over about a year, adjusted for splits. None if unknown."""
+    by_end = {}
+    for tag in SHARE_TAGS:
+        for f in facts.get(tag, []):
+            if f["end"] not in by_end or f["filed"] > by_end[f["end"]][0]:
+                by_end[f["end"]] = (f["filed"], f["val"])
+    if len(by_end) < 2:
+        return None
+    latest = max(by_end)
+    target = pdate(latest) - timedelta(days=365)
+    old = min((e for e in by_end if e != latest), key=lambda e: abs((pdate(e) - target).days))
+    if abs((pdate(old) - target).days) > 75:
+        return None
+    new_v = by_end[latest][1] * split_factor(latest, splits)
+    old_v = by_end[old][1] * split_factor(old, splits)
+    return new_v / old_v - 1 if old_v else None
+
+
+def level(value, high, med):
+    """Higher value = higher risk."""
+    return "high" if value >= high else ("med" if value >= med else "low")
+
+
+def risk_metrics(ticker, cash, splits):
+    if not SEC_UA:
+        return {"error": "no_ua"}
+    try:
+        cik = sec_cik_map().get(ticker)
+        if not cik:
+            return {"error": "no_cik"}
+        facts = sec_facts(cik)
+        filings = sec_filings(cik)
+    except (requests.RequestException, ValueError, KeyError):
+        return {"error": "sec_unavailable"}
+
+    today = date.today()
+    d_recent = (today - timedelta(days=RULES["recent_days"])).isoformat()
+    d_year = (today - timedelta(days=365)).isoformat()
+    n_pros = len({d for f, d in filings if f.startswith("424B") and d >= d_year})
+    offering = "high" if any(d >= d_recent for _, d in filings) else ("med" if any(d >= d_year for _, d in filings) else "low")
+    frequency = level(n_pros, RULES["freq_high"], RULES["freq_med"])
+
+    growth = share_growth(facts, splits)
+    dilution = level(growth, RULES["dilution_high"], RULES["dilution_med"]) if growth is not None else "na"
+
+    warrants, ratio = "na", None
+    w, s = latest_instant(facts, WARRANT_TAGS), latest_instant(facts, SHARE_TAGS)
+    if w and s and s[1]:
+        ratio = (w[1] * split_factor(w[0], splits)) / (s[1] * split_factor(s[0], splits))
+        warrants = level(ratio, RULES["warrants_high"], RULES["warrants_med"])
+
+    months, burn = (cash or {}).get("months"), (cash or {}).get("burn")
+    if months is not None:
+        cash_need = "high" if months < RULES["cash_months_high"] else ("med" if months < RULES["cash_months_med"] else "low")
+    elif burn is not None and burn >= 0:
+        cash_need = "low"
+    else:
+        cash_need = "na"
+
+    points = {"low": 1, "med": 2, "high": 3}
+    known = [points[x] for x in (offering, dilution, frequency, cash_need, warrants) if x in points]
+    if len(known) < 3:
+        overall = "na"
+    else:
+        avg = sum(known) / len(known)
+        overall = "high" if avg >= 2.4 else ("med" if avg >= 1.7 else "low")
+
+    return {
+        "overall": overall, "offering": offering, "dilution": dilution, "frequency": frequency,
+        "cash_need": cash_need, "warrants": warrants,
+        "growth": growth, "n_pros": n_pros, "ratio": ratio,
+    }
+
+
+def risk_html(extras):
+    labels = [("Overall Risk", "overall"), ("Offering", "offering"), ("Dilution", "dilution"),
+              ("Frequency", "frequency"), ("Cash Need", "cash_need"), ("Warrants", "warrants")]
+    names = {"low": "Low", "med": "Medium", "high": "High", "na": "N/A"}
+
+    def badges(get_level, get_text):
+        return '<div class="badges">' + "".join(
+            f'<div><small>{label}</small><span class="b {get_level(key)}">{get_text(key)}</span></div>'
+            for label, key in labels
+        ) + "</div>"
+
+    if extras is None:
+        return badges(lambda k: "na", lambda k: "…")
+    r = extras.get("risk") or {}
+    err = r.get("error")
+    if err == "no_ua":
+        return '<div class="mute">Add SEC_USER_AGENT to the app secrets to show risk ratings.</div>'
+    if err == "no_cik":
+        return '<div class="mute">No SEC filing data found for this ticker.</div>'
+    if err:
+        return '<div class="mute">SEC data is unavailable right now.</div>'
+    parts = []
+    if r.get("growth") is not None:
+        parts.append(f"share count {r['growth']:+.0%} over about a year (split-adjusted)")
+    parts.append(f"{r.get('n_pros', 0)} prospectus filings in 12 months")
+    if r.get("ratio") is not None:
+        parts.append(f"warrants about {r['ratio']:.0%} of shares")
+    note = "Rule-based estimate from SEC filings: " + " · ".join(parts)
+    return badges(lambda k: r.get(k, "na"), lambda k: names.get(r.get(k, "na"), "N/A")) + f'<div class="note">{html.escape(note)}</div>'
 
 
 def money(n, sign=False):
@@ -418,7 +573,7 @@ def build_card(ticker, res, info, splits, extras):
     else:
         gap_html = gap_head + '<div class="mute">No gap history in the lookback period.</div>'
 
-    split_lines = [t for t in (split_text(s) for s in (splits or {}).get("results", [])) if t]
+    split_lines = [t for t in (split_text(s) for s in (splits or {}).get("results", [])[:3]) if t]
     split_html = "".join(f"<div>• {html.escape(t)}</div>" for t in split_lines) or '<div class="mute">No recent splits.</div>'
 
     return (
@@ -428,6 +583,7 @@ def build_card(ticker, res, info, splits, extras):
         f'<div class="mute">{html.escape(exch)}</div>'
         f'<p class="desc">{html.escape(d.get("description", "")[:220])}</p><hr>'
         f'<div class="grid">{cells}</div><hr>'
+        f'<div class="sec">Dilution &amp; Risk Ratings</div>{risk_html(extras)}<hr>'
         f'<div class="sec">Gap Analysis · {direction}</div>{gap_html}<hr>'
         f'{cash_html(extras)}<hr>'
         f'<div class="sec">Latest News</div>{news_html(extras)}<hr>'
@@ -451,11 +607,12 @@ if ticker:
         box = st.empty()
         box.markdown(build_card(ticker, res, info, splits, None), unsafe_allow_html=True)
 
-        with st.spinner("Loading float, short interest, news and cash data (the free plan allows 5 requests a minute, so this can take up to a minute)..."):
+        with st.spinner("Loading float, short interest, news, cash and risk data (the free plan allows 5 requests a minute, so this can take up to a minute)..."):
             extras = {
                 "float": get(f"/stocks/vX/float?ticker={ticker}"),
                 "short": get(f"/stocks/v1/short-interest?ticker={ticker}&sort=settlement_date.desc&limit=1"),
                 "news": get(f"/v2/reference/news?ticker={ticker}&limit=3&order=desc&sort=published_utc"),
                 "cash": cash_metrics(ticker),
             }
+            extras["risk"] = risk_metrics(ticker, extras["cash"], splits)
         box.markdown(build_card(ticker, res, info, splits, extras), unsafe_allow_html=True)
