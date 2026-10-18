@@ -686,6 +686,26 @@ def finviz_own(ticker):
     return out
 
 
+def et_now(now_utc=None):
+    """Current date and time in US Eastern time, as ('OCT 18, 2026', '10:06 AM ET')."""
+    now_utc = now_utc or datetime.utcnow()
+    try:
+        from zoneinfo import ZoneInfo
+        from datetime import timezone
+        t = now_utc.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("America/New_York"))
+    except Exception:
+        # Fallback: US daylight time runs from the 2nd Sunday of March to the 1st Sunday of November (2:00 local)
+        y = now_utc.year
+        mar1, nov1 = date(y, 3, 1), date(y, 11, 1)
+        start = mar1 + timedelta(days=(6 - mar1.weekday()) % 7 + 7)
+        end = nov1 + timedelta(days=(6 - nov1.weekday()) % 7)
+        dst_start = datetime(start.year, start.month, start.day, 7)  # 2:00 EST = 07:00 UTC
+        dst_end = datetime(end.year, end.month, end.day, 6)          # 2:00 EDT = 06:00 UTC
+        t = now_utc + timedelta(hours=-4 if dst_start <= now_utc < dst_end else -5)
+    hour = t.hour % 12 or 12
+    return t.strftime("%b %d, %Y").upper(), f"{hour}:{t.minute:02d} {'AM' if t.hour < 12 else 'PM'} ET"
+
+
 def build_card(ticker, res, info, splits, extras):
     last, prev = res[-1], res[-2]
     change = (last["c"] - prev["c"]) / prev["c"] * 100
@@ -695,6 +715,7 @@ def build_card(ticker, res, info, splits, extras):
     recent = res[-30:]
     d = (info or {}).get("results", {})
     exch = EXCHANGES.get(d.get("primary_exchange"), d.get("primary_exchange", ""))
+    stamp_date, stamp_time = et_now()
     country = (extras or {}).get("country")
     country_txt = f" &nbsp;•&nbsp; {html.escape(country)}" if country else ""
     shares = d.get("share_class_shares_outstanding") or d.get("weighted_shares_outstanding")
@@ -751,8 +772,9 @@ def build_card(ticker, res, info, splits, extras):
     split_html = "".join(f"<div>• {html.escape(t)}</div>" for t in split_lines) or '<div class="mute">No recent splits.</div>'
 
     return (
-        f'<div class="card"><h1>{ticker} - ${last["c"]:.2f} '
-        f'<span class="{cls}">({change:+.2f}%)</span></h1>'
+        f'<div class="card"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">'
+        f'<h1 style="margin:0;min-width:0">{ticker} - ${last["c"]:.2f} <span class="{cls}">({change:+.2f}%)</span></h1>'
+        f'<div class="mute" style="text-align:right;white-space:nowrap;font-size:13px;line-height:1.35">{stamp_date}<br>{stamp_time}</div></div>'
         f'<div class="mute">{html.escape(d.get("name", ""))}</div>'
         f'<div class="mute">{html.escape(exch)}{country_txt}</div>'
         f'{flags_html(d, extras)}'
