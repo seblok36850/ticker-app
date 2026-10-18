@@ -467,10 +467,10 @@ def flags_html(d, extras):
     typ = d.get("type")
     adr = None if not typ else ("Yes" if str(typ).startswith("ADR") else "No")
     if extras is None:
-        return f'<div class="flags">{cell("ADR", adr, warn=False)} &nbsp;•&nbsp; Reg SHO: … &nbsp;•&nbsp; SSR: …</div>'
+        return f'<div class="flags" style="font-size:inherit;margin:0;text-align:right">{cell("ADR", adr, warn=False)} &nbsp;•&nbsp; Reg SHO: … &nbsp;•&nbsp; SSR: …</div>'
     f = extras.get("flags") or {}
     return (
-        f'<div class="flags">{cell("ADR", adr, warn=False)} &nbsp;•&nbsp; {cell("Reg SHO", f.get("reg_sho"))}'
+        f'<div class="flags" style="font-size:inherit;margin:0;text-align:right">{cell("ADR", adr, warn=False)} &nbsp;•&nbsp; {cell("Reg SHO", f.get("reg_sho"))}'
         f' &nbsp;•&nbsp; {cell("SSR", f.get("ssr"))}</div>'
     )
 
@@ -778,8 +778,9 @@ def build_card(ticker, res, info, splits, extras):
         f'<h1 style="margin:0;min-width:0">{ticker} - ${last["c"]:.2f} <span class="{cls}">({change:+.2f}%)</span></h1>'
         f'<div class="mute" style="text-align:right;white-space:nowrap;font-size:13px;line-height:1.35;font-weight:700">{stamp_date}<br>{stamp_time}</div></div>'
         f'<div class="mute">{html.escape(d.get("name", ""))}</div>'
+        f'<div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:2px 12px">'
         f'<div class="mute">{html.escape(exch)}{country_txt}</div>'
-        f'{flags_html(d, extras)}'
+        f'{flags_html(d, extras)}</div>'
         f'<p class="desc">{html.escape(d.get("description", "")[:220])}</p><hr>'
         f'<div class="grid">{cells}</div><hr>'
         f'<div class="sec">Dilution &amp; Risk Ratings</div>{risk_html(extras)}<hr>'
