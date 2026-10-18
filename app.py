@@ -772,9 +772,10 @@ def build_card(ticker, res, info, splits, extras):
     split_html = "".join(f"<div>• {html.escape(t)}</div>" for t in split_lines) or '<div class="mute">No recent splits.</div>'
 
     return (
-        f'<div class="card"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">'
+        f'<div class="card"><div style="font-weight:700;font-size:15px;margin-bottom:6px">Stelyn Holdings LLC</div>'
+        f'<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">'
         f'<h1 style="margin:0;min-width:0">{ticker} - ${last["c"]:.2f} <span class="{cls}">({change:+.2f}%)</span></h1>'
-        f'<div class="mute" style="text-align:right;white-space:nowrap;font-size:13px;line-height:1.35">{stamp_date}<br>{stamp_time}</div></div>'
+        f'<div class="mute" style="text-align:right;white-space:nowrap;font-size:13px;line-height:1.35;font-weight:700">{stamp_date}<br>{stamp_time}</div></div>'
         f'<div class="mute">{html.escape(d.get("name", ""))}</div>'
         f'<div class="mute">{html.escape(exch)}{country_txt}</div>'
         f'{flags_html(d, extras)}'
