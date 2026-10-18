@@ -61,8 +61,9 @@ st.markdown(
     .tbl tr.hl td{background:#1d2d44}
     .flags{font-size:14px;color:#9aa1ad;margin-top:2px}
     .note{color:#6f7682;font-size:11px;line-height:1.3;margin-top:8px}
-    .badges{display:flex;gap:12px;flex-wrap:wrap}
-    .badges small{display:block;color:#9aa1ad;font-size:12px;margin-bottom:2px}
+    .badges{display:grid;grid-template-columns:repeat(6,1fr);gap:6px}
+    .badges small{display:block;color:#9aa1ad;font-size:12px;margin-bottom:2px;line-height:1.15}
+    .badges .b{display:block;text-align:center;padding:3px 2px}
     .b{display:inline-block;padding:1px 8px;border-radius:5px;font-size:13px;color:#111}
     .b.med{background:#f2c27a}.b.high{background:#8c2340;color:#fff}.b.low{background:#a9dcb0}.b.na{background:#3a3f48;color:#9aa1ad}
     .news{margin:6px 0;font-size:14px;line-height:1.3}
