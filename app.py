@@ -20,6 +20,8 @@ INVEST_TAGS = ["ShortTermInvestments", "MarketableSecuritiesCurrent", "Available
 OCF_TAGS = ["NetCashProvidedByUsedInOperatingActivities", "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"]
 SHARE_TAGS = ["EntityCommonStockSharesOutstanding"]  # share count on the cover of each 10-Q / 10-K
 WARRANT_TAGS = ["ClassOfWarrantOrRightOutstanding"]
+EXERCISE_TAGS = ["ClassOfWarrantOrRightExercisePriceOfWarrantsOrRights"]
+SHELF_FORMS = ("S-3", "F-3")  # shelf registration statements (includes the ASR variants)
 OFFERING_FORMS = ("424B", "S-1", "S-3", "F-1", "F-3")  # prospectuses and registration statements
 
 NASDAQ_FILES = {
@@ -66,6 +68,19 @@ st.markdown(
     .badges .b{display:block;text-align:center;padding:3px 2px}
     .b{display:inline-block;padding:1px 8px;border-radius:5px;font-size:13px;color:#111}
     .b.med{background:#f2c27a}.b.high{background:#8c2340;color:#fff}.b.low{background:#a9dcb0}.b.na{background:#3a3f48;color:#9aa1ad}
+    .dil{border:1px solid #6b2a3a;background:#2a1820;border-radius:12px;padding:10px 12px;margin-top:6px}
+    .dil .row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+    .dil .ttl{font-weight:700;font-size:13px;letter-spacing:.04em;color:#e8ebf0}
+    .dil .lvl{font-weight:700;font-size:17px}
+    .dil .bars{display:flex;gap:4px;flex:1;min-width:140px}
+    .dil .bars i{flex:1;height:9px;border-radius:5px;background:#3a3f48}
+    .dil .sc{font-weight:700;font-size:17px}
+    .inst{display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid #2a2e36;font-size:13px}
+    .inst .nm{font-weight:700;min-width:84px;font-size:14px}
+    .inst .dt{flex:1;color:#c3c8d0;line-height:1.3}
+    .inst .st{border:1px solid;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700}
+    .dm{width:9px;height:9px;transform:rotate(45deg);flex:none}
+    .lv-low{color:#22e05a}.lv-mod{color:#f2c27a}.lv-high{color:#ff7a59}.lv-ext{color:#ff3b5c}
     .news{margin:6px 0;font-size:14px;line-height:1.3}
     .news a{color:#9cc9f5;text-decoration:none}
     label, .stTextInput label p{color:#9aa1ad !important}
@@ -253,6 +268,7 @@ def sec_facts(cik):
 
     collect("us-gaap", CASH_TAGS + INVEST_TAGS + OCF_TAGS, "USD")
     collect("us-gaap", WARRANT_TAGS, "shares")
+    collect("us-gaap", EXERCISE_TAGS, "USD/shares")
     collect("dei", SHARE_TAGS, "shares")
     return keep
 
@@ -707,6 +723,147 @@ def et_now(now_utc=None):
     return t.strftime("%b %d, %Y").upper(), f"{hour}:{t.minute:02d} {'AM' if t.hour < 12 else 'PM'} ET"
 
 
+@st.cache_data(ttl=3600)
+def sec_submissions(cik):
+    """Slim list of recent filings: form, date, accession number, main document, 8-K item codes."""
+    r = requests.get(f"https://data.sec.gov/submissions/CIK{cik:010d}.json", headers={"User-Agent": SEC_UA}, timeout=30)
+    r.raise_for_status()
+    rec = r.json().get("filings", {}).get("recent", {})
+    keys = ("form", "filingDate", "accessionNumber", "primaryDocument", "items")
+    cols = [rec.get(k, []) for k in keys]
+    return [dict(zip(keys, row)) for row in zip(*cols)]
+
+
+@st.cache_data(ttl=86400)
+def filing_text(cik, accession, doc):
+    """First part of a filing's main document as plain text (empty string if it cannot be read)."""
+    import re
+    try:
+        url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession.replace('-', '')}/{doc}"
+        r = requests.get(url, headers={"User-Agent": SEC_UA}, timeout=20, stream=True)
+        r.raise_for_status()
+        raw = next(r.iter_content(250000), b"").decode("utf-8", "ignore")
+    except Exception:
+        return ""
+    raw = re.sub(r"(?is)<(script|style).*?</\1>", " ", raw)
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", raw)))
+
+
+def dollar_amount(text):
+    """First 'up to $X' / 'aggregate ... $X' amount in the text, in dollars. None if not found."""
+    import re
+    m = re.search(r"(?:up to|aggregate offering price of(?: up to)?|aggregate of|aggregate amount of)\s+(?:an aggregate of\s+)?\$\s?([\d,]+(?:\.\d+)?)\s*(million|billion)?", text, re.I)
+    if not m:
+        return None
+    v = float(m.group(1).replace(",", ""))
+    return v * {"million": 1e6, "billion": 1e9}.get((m.group(2) or "").lower(), 1)
+
+
+def share_amount(text):
+    """First share count (5+ digits) that appears in front of the word 'shares'. None if not found."""
+    import re
+    m = re.search(r"([\d]{1,3}(?:,\d{3}){1,4})\s+(?:additional\s+)?(?:[A-Za-z]+\s+){0,3}(?:shares|ADSs|ADS)", text)
+    return float(m.group(1).replace(",", "")) if m else None
+
+
+def dilution_panel(ticker, cash, risk, splits, today=None):
+    """Active / material dilution instruments and a 0-10 dilution score."""
+    if not SEC_UA:
+        return {"error": "no_ua"}
+    try:
+        cik = sec_cik_map().get(ticker)
+        if not cik:
+            return {"error": "no_cik"}
+        subs = sec_submissions(cik)
+        facts = sec_facts(cik)
+    except (requests.RequestException, ValueError, KeyError):
+        return {"error": "sec_unavailable"}
+
+    today = today or date.today()
+    iso = lambda days: (today - timedelta(days=days)).isoformat()
+    items = []
+
+    # Shelf: S-3 / F-3 filed in the last 3 years; effective date from the SEC's EFFECT notice if there is one
+    shelves = sorted((f for f in subs if f["form"].startswith(SHELF_FORMS) and f["filingDate"] >= iso(3 * 365)), key=lambda f: f["filingDate"], reverse=True)
+    if shelves:
+        f = shelves[0]
+        eff = next((e["filingDate"] for e in sorted(subs, key=lambda e: e["filingDate"]) if e["form"] == "EFFECT" and e["filingDate"] >= f["filingDate"]), None)
+        amt = dollar_amount(filing_text(cik, f["accessionNumber"], f["primaryDocument"])) if f["primaryDocument"] else None
+        when = f"{f['form']} effective {eff}" if eff else (f"{f['form']} filed {f['filingDate']}")
+        items.append({"kind": "SHELF", "detail": (f"{money(amt)} shelf · " if amt else "Shelf registration · ") + when, "status": "ACTIVE", "sev": "high"})
+
+    # S-8: employee equity plans registered in the last 12 months
+    for f in sorted((f for f in subs if f["form"] == "S-8" and f["filingDate"] >= iso(365)), key=lambda f: f["filingDate"], reverse=True)[:2]:
+        n = share_amount(filing_text(cik, f["accessionNumber"], f["primaryDocument"])) if f["primaryDocument"] else None
+        items.append({"kind": "S-8 PLAN", "detail": (f"{short(n)} shares registered " if n else "Equity plan registered ") + f["filingDate"], "status": "ACTIVE", "sev": "high" if not items or items[-1]["kind"] != "S-8 PLAN" else "mod"})
+
+    # Warrants: latest count in SEC filings
+    w = latest_instant(facts, WARRANT_TAGS)
+    if w and w[1] > 0:
+        ex = latest_instant(facts, EXERCISE_TAGS)
+        items.append({"kind": "WARRANT", "detail": f"{short(w[1] * split_factor(w[0], splits))} warrants outstanding as of {w[0]}" + (f" · exercise ${ex[1]:.2f}" if ex else ""), "status": "ACTIVE", "sev": "high" if (risk or {}).get("warrants") == "high" else "mod"})
+
+    # Private sales: 8-K item 3.02 (unregistered sale of equity) in the last 12 months
+    for f in sorted((f for f in subs if f["form"].startswith("8-K") and "3.02" in str(f.get("items", "")) and f["filingDate"] >= iso(365)), key=lambda f: f["filingDate"], reverse=True)[:2]:
+        items.append({"kind": "PRIVATE SALE", "detail": f"Unregistered equity sale reported {f['filingDate']} (8-K Item 3.02)", "status": "ISSUED", "sev": "mod"})
+
+    # Score out of 10
+    r = risk or {}
+    pts = {"high": 2, "med": 1}
+    score = (3 if shelves else 0) + (1 if any(i["kind"] == "S-8 PLAN" for i in items) else 0)
+    score += pts.get(r.get("warrants"), 0) + pts.get(r.get("cash_need"), 0)
+    score += 1 if any(i["kind"] == "PRIVATE SALE" for i in items) else 0
+    score += 1 if r.get("dilution") == "high" else 0
+    score = min(score, 10)
+    label = "LOW" if score <= 2 else ("MODERATE" if score <= 4 else ("HIGH" if score <= 6 else "EXTREME"))
+    reviewed = max((f["filingDate"] for f in subs), default=None)
+    return {"items": items, "score": score, "label": label, "reviewed": reviewed}
+
+
+def dilution_html(extras):
+    head = '<div class="sec">Dilution Risk Rating</div>'
+    if extras is None:
+        return head + '<div class="mute">Loading…</div>'
+    d = extras.get("dilution") or {}
+    err = d.get("error")
+    if err == "no_ua":
+        return head + '<div class="mute">Add SEC_USER_AGENT to the app secrets to show dilution instruments.</div>'
+    if err == "no_cik":
+        return head + '<div class="mute">No SEC filing data found for this ticker.</div>'
+    if err or not d:
+        return head + '<div class="mute">SEC data is unavailable right now.</div>'
+    score, label = d["score"], d["label"]
+    cls = {"LOW": "lv-low", "MODERATE": "lv-mod", "HIGH": "lv-high", "EXTREME": "lv-ext"}[label]
+    col = {"LOW": "#22e05a", "MODERATE": "#f2c27a", "HIGH": "#ff7a59", "EXTREME": "#ff3b5c"}[label]
+    bars = "".join(f'<i style="background:{col}"></i>' if i < score else "<i></i>" for i in range(10))
+    box = (
+        f'<div class="dil"><div class="row"><div><div class="ttl">DILUTION RISK</div><div class="lvl {cls}">{label}</div></div>'
+        f'<div class="bars">{bars}</div><div class="sc {cls}">{score} / 10</div></div>'
+        f'<div class="mute" style="font-size:12px;margin-top:6px">Score weighs active shelf, equity plans, warrants, cash need, private sales and share growth.</div></div>'
+    )
+    items = d["items"]
+    n = len(items)
+    rev = f'Latest filing reviewed: {html.escape(d["reviewed"])}' if d.get("reviewed") else ""
+    rows = ""
+    for it in items:
+        c = "#ff3b5c" if it["sev"] == "high" else "#d8962a"
+        rows += (
+            f'<div class="inst"><span class="dm" style="background:{c}"></span><span class="nm">{html.escape(it["kind"])}</span>'
+            f'<span class="dt">{html.escape(it["detail"])}</span>'
+            f'<span class="st" style="color:{c};border-color:{c}">{it["status"]}</span></div>'
+        )
+    if not rows:
+        rows = '<div class="mute" style="padding:8px 0">No active or material instruments found in recent SEC filings.</div>'
+    return (
+        head + box
+        + f'<div class="row" style="display:flex;justify-content:space-between;margin:12px 0 2px;flex-wrap:wrap;gap:4px">'
+        f'<div class="ttl" style="font-weight:700;font-size:14px">{n} ACTIVE / MATERIAL INSTRUMENT{"S" if n != 1 else ""}</div>'
+        f'<div class="mute" style="font-size:12px">{rev}</div></div>{rows}'
+        '<div class="note">Instruments are read from SEC filings by simple rules (shelf = S-3/F-3 filed in the last 3 years, equity plan = S-8 in the last year, '
+        'private sale = 8-K Item 3.02 in the last year). Amounts are taken from the filing text when found.</div>'
+    )
+
+
 def build_card(ticker, res, info, splits, extras):
     last, prev = res[-1], res[-2]
     change = (last["c"] - prev["c"]) / prev["c"] * 100
@@ -788,7 +945,8 @@ def build_card(ticker, res, info, splits, extras):
         f'{cash_html(extras)}<hr>'
         f'<div class="sec">Latest News</div>{news_html(extras)}<hr>'
         f'<div class="sec">Recent Splits</div>{split_html}<hr>'
-        f'<div class="chart"><span>Daily 1Y</span>{chart_svg([b["c"] for b in res[-252:]])}</div></div>'
+        f'<div class="chart"><span>Daily 1Y</span>{chart_svg([b["c"] for b in res[-252:]])}</div>'
+        f'<hr>{dilution_html(extras)}</div>'
     )
 
 
@@ -816,6 +974,7 @@ if ticker:
                 "cash": cash_metrics(ticker),
             }
             extras["risk"] = risk_metrics(ticker, extras["cash"], splits)
+            extras["dilution"] = dilution_panel(ticker, extras["cash"], extras["risk"], splits)
             extras["own"] = finviz_own(ticker)
             extras["country"] = sec_country(ticker)
             extras["flags"] = reg_flags(ticker, (info or {}).get("results", {}).get("primary_exchange"))
