@@ -1,4 +1,5 @@
 import html
+import time
 from datetime import date, timedelta
 
 import requests
@@ -31,6 +32,8 @@ st.markdown(
     .tbl td{padding:3px 4px;text-align:center;border:1px solid #2a2e36;color:#f1f3f6}
     .tbl td:first-child{text-align:left}
     .tbl tr.hl td{background:#1d2d44}
+    .news{margin:6px 0;font-size:14px;line-height:1.3}
+    .news a{color:#9cc9f5;text-decoration:none}
     label, .stTextInput label p{color:#9aa1ad !important}
     </style>""",
     unsafe_allow_html=True,
@@ -44,11 +47,26 @@ def _fetch(path):
     return r.json()
 
 
-def get(path):
-    try:
-        return _fetch(path)
-    except requests.RequestException:
-        return None
+def get(path, tries=5):
+    """Fetch a path. If the free plan's rate limit (429) is hit, wait and retry."""
+    for attempt in range(tries):
+        try:
+            return _fetch(path)
+        except requests.HTTPError as e:
+            code = e.response.status_code if e.response is not None else None
+            if code == 429 and attempt < tries - 1:
+                time.sleep(15)
+                continue
+            return None
+        except requests.RequestException:
+            return None
+    return None
+
+
+def first(data):
+    """First item of a response's results list, or an empty dict."""
+    results = (data or {}).get("results") or []
+    return results[0] if results else {}
 
 
 def short(n):
@@ -67,7 +85,7 @@ def pct(v):
 def chart_svg(closes):
     w, h, pad = 390, 130, 8
     hi = max(closes) or 1
-    n = len(closes) - 1
+    n = max(len(closes) - 1, 1)
     pts = [(i / n * w, h - pad - c / hi * (h - 2 * pad)) for i, c in enumerate(closes)]
     line = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
     fmt = (lambda v: f"${v:,.0f}") if hi >= 10 else (lambda v: f"${v:.2f}")
@@ -107,11 +125,20 @@ def split_text(s):
     a, b = s.get("split_from"), s.get("split_to")
     if a is None or b is None:
         return None
-    if a > b:
+    if s.get("adjustment_type") == "stock_dividend":
+        kind, ratio = "stock dividend", f"{b:g}:{a:g}"
+    elif a > b:
         kind, ratio = "reverse split", f"{a:g}:{b:g}"
     else:
         kind, ratio = "split", f"{b:g}:{a:g}"
     return f"{ratio} {kind} on {s.get('execution_date', '')}"
+
+
+def get_splits(ticker):
+    data = get(f"/stocks/v1/splits?ticker={ticker}&limit=3")
+    if data is None:  # fall back to the older endpoint
+        data = get(f"/v3/reference/splits?ticker={ticker}&order=desc&limit=3")
+    return data
 
 
 def gap_analysis(res, up):
@@ -166,68 +193,115 @@ def gap_table(stats, today_mag, up):
     )
 
 
+def news_html(extras):
+    if extras is None:
+        return '<div class="mute">Loading…</div>'
+    items = ((extras.get("news") or {}).get("results") or [])[:3]
+    if not items:
+        return '<div class="mute">No news available.</div>'
+    out = ""
+    for n in items:
+        title = html.escape((n.get("title") or "")[:110]).replace("$", "&#36;")
+        url = n.get("article_url") or ""
+        if url.startswith(("http://", "https://")):
+            title = f'<a href="{html.escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">{title}</a>'
+        pub = html.escape((n.get("publisher") or {}).get("name", ""))
+        day = html.escape((n.get("published_utc") or "")[:10])
+        out += f'<div class="news">{title}<br><span class="mute" style="font-size:12px">{pub} · {day}</span></div>'
+    return out
+
+
+def build_card(ticker, res, info, splits, extras):
+    last, prev = res[-1], res[-2]
+    change = (last["c"] - prev["c"]) / prev["c"] * 100
+    open_gap = (last["o"] - prev["c"]) / prev["c"] * 100
+    up = change >= 0
+    cls = "up" if up else "down"
+    recent = res[-30:]
+    d = (info or {}).get("results", {})
+    exch = EXCHANGES.get(d.get("primary_exchange"), d.get("primary_exchange", ""))
+    shares = d.get("share_class_shares_outstanding") or d.get("weighted_shares_outstanding")
+
+    # Float and short interest (loaded in a second step)
+    if extras is None:
+        float_txt = short_txt = "…"
+    else:
+        fl = first(extras.get("float")).get("free_float")
+        si = first(extras.get("short")).get("short_interest")
+        float_txt = short(fl) if fl else "N/A"
+        if si is not None and fl:
+            short_txt = f"{si / fl * 100:.1f}%"
+        elif si is not None:
+            short_txt = f"{short(si)} sh"
+        else:
+            short_txt = "N/A"
+
+    stats = [
+        ("Prev Close", f"${prev['c']:.2f}"),
+        ("Market Cap", short(d.get("market_cap"))),
+        ("Float", float_txt),
+        ("OS", short(shares)),
+        ("Short Interest", short_txt),
+        ("Vol Avg.", short(sum(b["v"] for b in recent) / len(recent))),
+    ]
+    cells = "".join(f"<div><small>{k}</small><b>{v}</b></div>" for k, v in stats)
+
+    # Gap analysis
+    direction = "Gap Up" if up else "Gap Down"
+    gstats, gseries = gap_analysis(res, up)
+    gap_head = (
+        f'<div class="mute" style="font-size:12px">Today {change:+.1f}% ({bucket_label(abs(change))})'
+        f" · open {open_gap:+.1f}% · {direction} · {LOOKBACK_DAYS}d lookback</div>"
+    )
+    if gstats:
+        avg = sum(s[0] for s in gstats) / len(gstats)
+        gap_html = (
+            gap_head
+            + gap_table(gstats, abs(change), up)
+            + f'<div class="chart"><span>{direction} history (n={len(gstats)})</span>'
+            + f'<span class="r">last {pct(gstats[-1][0])} &nbsp; avg {pct(avg)}</span>'
+            + gap_svg(gseries, avg)
+            + "</div>"
+        )
+    else:
+        gap_html = gap_head + '<div class="mute">No gap history in the lookback period.</div>'
+
+    split_lines = [t for t in (split_text(s) for s in (splits or {}).get("results", [])) if t]
+    split_html = "".join(f"<div>• {html.escape(t)}</div>" for t in split_lines) or '<div class="mute">No recent splits.</div>'
+
+    return (
+        f'<div class="card"><h1>{ticker} - ${last["c"]:.2f} '
+        f'<span class="{cls}">({change:+.2f}%)</span></h1>'
+        f'<div class="mute">{html.escape(d.get("name", ""))}</div>'
+        f'<div class="mute">{html.escape(exch)}</div>'
+        f'<p class="desc">{html.escape(d.get("description", "")[:220])}</p><hr>'
+        f'<div class="grid">{cells}</div><hr>'
+        f'<div class="sec">Gap Analysis · {direction}</div>{gap_html}<hr>'
+        f'<div class="sec">Latest News</div>{news_html(extras)}<hr>'
+        f'<div class="sec">Recent Splits</div>{split_html}<hr>'
+        f'<div class="chart"><span>Daily 1Y</span>{chart_svg([b["c"] for b in res[-252:]])}</div></div>'
+    )
+
+
 ticker = st.text_input("Ticker", value="AMOD", max_chars=6).strip().upper()
 
 if ticker:
     start = date.today() - timedelta(days=LOOKBACK_DAYS)
     bars = get(f"/v2/aggs/ticker/{ticker}/range/1/day/{start}/{date.today()}?adjusted=true&sort=asc&limit=5000")
     info = get(f"/v3/reference/tickers/{ticker}")
-    splits = get(f"/v3/reference/splits?ticker={ticker}&order=desc&limit=3")
+    splits = get_splits(ticker)
 
     if not bars or not bars.get("results") or len(bars["results"]) < 2:
-        st.write(f"No data found for {ticker}, or the free plan's 5-requests-per-minute limit was hit. Wait a minute and try again.")
+        st.write(f"No data found for {ticker}, or the free plan's request limit was hit. Wait a minute and try again.")
     else:
         res = bars["results"]
-        last, prev = res[-1], res[-2]
-        change = (last["c"] - prev["c"]) / prev["c"] * 100
-        open_gap = (last["o"] - prev["c"]) / prev["c"] * 100
-        up = change >= 0
-        recent = res[-30:]
-        d = (info or {}).get("results", {})
-        exch = EXCHANGES.get(d.get("primary_exchange"), d.get("primary_exchange", ""))
-        shares = d.get("share_class_shares_outstanding") or d.get("weighted_shares_outstanding")
-        stats = [
-            ("Prev Close", f"${prev['c']:.2f}"),
-            ("Market Cap", short(d.get("market_cap"))),
-            ("OS", short(shares)),
-            ("Vol Avg.", short(sum(b["v"] for b in recent) / len(recent))),
-        ]
-        cells = "".join(f"<div><small>{k}</small><b>{v}</b></div>" for k, v in stats)
-        cls = "up" if up else "down"
+        box = st.empty()
+        box.markdown(build_card(ticker, res, info, splits, None), unsafe_allow_html=True)
 
-        # Gap analysis
-        direction = "Gap Up" if up else "Gap Down"
-        gstats, gseries = gap_analysis(res, up)
-        gap_head = (
-            f'<div class="mute" style="font-size:12px">Today {change:+.1f}% ({bucket_label(abs(change))})'
-            f" · open {open_gap:+.1f}% · {direction} · {LOOKBACK_DAYS}d lookback</div>"
-        )
-        if gstats:
-            avg = sum(s[0] for s in gstats) / len(gstats)
-            last_gap = gstats[-1][0]
-            gap_html = (
-                gap_head
-                + gap_table(gstats, abs(change), up)
-                + f'<div class="chart"><span>{direction} history (n={len(gstats)})</span>'
-                + f'<span class="r">last {pct(last_gap)} &nbsp; avg {pct(avg)}</span>'
-                + gap_svg(gseries, avg)
-                + "</div>"
-            )
-        else:
-            gap_html = gap_head + '<div class="mute">No gap history in the lookback period.</div>'
-
-        split_lines = [t for t in (split_text(s) for s in (splits or {}).get("results", [])) if t]
-        split_html = "".join(f"<div>• {html.escape(t)}</div>" for t in split_lines) or '<div class="mute">No recent splits.</div>'
-
-        card = (
-            f'<div class="card"><h1>{ticker} - ${last["c"]:.2f} '
-            f'<span class="{cls}">({change:+.2f}%)</span></h1>'
-            f'<div class="mute">{html.escape(d.get("name", ""))}</div>'
-            f'<div class="mute">{html.escape(exch)}</div>'
-            f'<p class="desc">{html.escape(d.get("description", "")[:220])}</p><hr>'
-            f'<div class="grid">{cells}</div><hr>'
-            f'<div class="sec">Gap Analysis · {direction}</div>{gap_html}<hr>'
-            f'<div class="sec">Recent Splits</div>{split_html}<hr>'
-            f'<div class="chart"><span>Daily 1Y</span>{chart_svg([b["c"] for b in res[-252:]])}</div></div>'
-        )
-        st.markdown(card, unsafe_allow_html=True)
+        with st.spinner("Loading float, short interest and news (the free plan allows 5 requests a minute, so this can take up to a minute)..."):
+            extras = {
+                "float": get(f"/stocks/vX/float?ticker={ticker}"),
+                "short": get(f"/stocks/v1/short-interest?ticker={ticker}&sort=settlement_date.desc&limit=1"),
+                "news": get(f"/v2/reference/news?ticker={ticker}&limit=3&order=desc&sort=published_utc"),
+            }
+        box.markdown(build_card(ticker, res, info, splits, extras), unsafe_allow_html=True)
