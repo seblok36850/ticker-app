@@ -563,6 +563,17 @@ def money(n, sign=False):
     return prefix + short(abs(n))
 
 
+def nasdaq_cell(extras):
+    """Nasdaq Composite day change, using the ONEQ ETF (tracks the Composite) because index data is not on the free plan."""
+    if extras is None:
+        return ("Nasdaq Comp", "…", "")
+    res = (extras.get("nasdaq") or {}).get("results") or []
+    if len(res) < 2 or not res[-2].get("c"):
+        return ("Nasdaq Comp", "N/A", "")
+    ch = (res[-1]["c"] - res[-2]["c"]) / res[-2]["c"] * 100
+    return ("Nasdaq Comp", f"{ch:+.2f}%", "up" if ch >= 0 else "down")
+
+
 def cash_html(extras):
     def grid(items):
         return '<div class="grid">' + "".join(
@@ -570,15 +581,15 @@ def cash_html(extras):
         ) + "</div>"
 
     if extras is None:
-        return grid([("Cash Left", "…", ""), ("Burn Rate", "…", ""), ("Est Cash", "…", "")])
+        return grid([nasdaq_cell(None), ("Cash Left", "…", ""), ("Burn Rate", "…", ""), ("Est Cash", "…", "")])
     m = extras.get("cash") or {}
     err = m.get("error")
     if err == "no_ua":
-        return '<div class="mute">Add SEC_USER_AGENT to the app secrets to show cash data.</div>'
+        return grid([nasdaq_cell(extras)]) + '<div class="mute">Add SEC_USER_AGENT to the app secrets to show cash data.</div>'
     if err == "no_cik":
-        return '<div class="mute">No SEC filing data found for this ticker.</div>'
+        return grid([nasdaq_cell(extras)]) + '<div class="mute">No SEC filing data found for this ticker.</div>'
     if err:
-        return '<div class="mute">SEC data is unavailable right now.</div>'
+        return grid([nasdaq_cell(extras)]) + '<div class="mute">SEC data is unavailable right now.</div>'
     burn, cash, months = m.get("burn"), m.get("cash"), m.get("months")
     if months is not None:
         left = f"{months:,.1f} months"
@@ -589,8 +600,9 @@ def cash_html(extras):
     burn_txt = money(burn, sign=True) if burn is not None else "N/A"
     cash_txt = money(cash) if cash is not None else "N/A"
     basis = {"reported": "as reported", "derived": "derived from year-to-date filings", "average": "estimated from a longer period"}.get(m.get("basis"), "")
-    note = f'Cash as of {m.get("cash_end") or "n/a"} · Burn Rate = latest quarter operating cash flow ({basis}) · source: SEC filings'
+    note = f'Cash as of {m.get("cash_end") or "n/a"} · Burn Rate = latest quarter operating cash flow ({basis}) · source: SEC filings · Nasdaq Comp = ONEQ ETF day change'
     return grid([
+        nasdaq_cell(extras),
         ("Cash Left", left, ""),
         ("Burn Rate", burn_txt, "" if burn is None else ("down" if burn < 0 else "up")),
         ("Est Cash", cash_txt, "up" if cash else ""),
@@ -741,6 +753,7 @@ if ticker:
                 "float": get(f"/stocks/vX/float?ticker={ticker}"),
                 "short": get(f"/stocks/v1/short-interest?ticker={ticker}&sort=settlement_date.desc&limit=1"),
                 "news": get(f"/v2/reference/news?ticker={ticker}&limit=3&order=desc&sort=published_utc"),
+                "nasdaq": get(f"/v2/aggs/ticker/ONEQ/range/1/day/{date.today() - timedelta(days=10)}/{date.today()}?adjusted=true&sort=asc&limit=20"),
                 "cash": cash_metrics(ticker),
             }
             extras["risk"] = risk_metrics(ticker, extras["cash"], splits)
