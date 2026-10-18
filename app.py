@@ -864,6 +864,90 @@ def dilution_html(extras):
     )
 
 
+def parse_ownership_xml(xml_text):
+    """Holdings of common-type shares reported in one Form 3/4/5: a list of
+    (owner id, security title, 'D' or 'I', nature of ownership, shares owned afterwards), in document order."""
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return []
+    owner = (root.findtext(".//reportingOwner/reportingOwnerId/rptOwnerCik") or root.findtext(".//reportingOwner/reportingOwnerId/rptOwnerName") or "?").strip()
+    out = []
+    for node in root.findall(".//nonDerivativeTable/*"):
+        title = (node.findtext("securityTitle/value") or "").strip()
+        low = title.lower()
+        if not any(w in low for w in ("common", "ordinary", "class a", "class b", "shares")) or any(w in low for w in ("warrant", "option", "preferred", "unit", "convertible", "note")):
+            continue
+        amt = node.findtext("postTransactionAmounts/sharesOwnedFollowingTransaction/value")
+        if amt is None:
+            continue
+        try:
+            n = float(amt)
+        except ValueError:
+            continue
+        di = (node.findtext("ownershipNature/directOrIndirectOwnership/value") or "D").strip().upper()[:1]
+        nature = (node.findtext("ownershipNature/natureOfOwnership/value") or "").strip().lower()
+        out.append((owner, title.lower(), di, nature, n))
+    return out
+
+
+def total_insider_shares(filings):
+    """filings: list of (date, accession, holdings) in any order. Latest report per holding wins; shared indirect holdings counted once."""
+    latest = {}
+    for _, _, holdings in sorted(filings, key=lambda f: (f[0], f[1])):
+        for owner, title, di, nature, n in holdings:
+            latest[(owner, title, di, nature)] = n
+    total, seen = 0.0, set()
+    for (owner, title, di, nature), n in latest.items():
+        if di == "I":  # the same fund or trust is often reported by several insiders
+            key = (title, nature, n)
+            if key in seen:
+                continue
+            seen.add(key)
+        total += n
+    owners = len({k[0] for k, n in latest.items() if n > 0})
+    return total, owners
+
+
+@st.cache_data(ttl=21600)
+def insider_holdings(ticker):
+    """Shares held by insiders, from the SEC's Form 3 / 4 / 5 filings of the last 2 years. {} if unavailable."""
+    from concurrent.futures import ThreadPoolExecutor
+    if not SEC_UA:
+        return {}
+    try:
+        cik = sec_cik_map().get(ticker.upper())
+        if not cik:
+            return {}
+        subs = sec_submissions(cik)
+    except Exception:
+        return {}
+    cutoff = (date.today() - timedelta(days=730)).isoformat()
+    picks = sorted(
+        (f for f in subs if f["form"] in ("3", "4", "5", "3/A", "4/A", "5/A") and f["filingDate"] >= cutoff and f["primaryDocument"]),
+        key=lambda f: f["filingDate"], reverse=True,
+    )[:80]
+    if not picks:
+        return {}
+
+    def one(f):
+        url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{f['accessionNumber'].replace('-', '')}/{f['primaryDocument'].split('/')[-1]}"
+        try:
+            r = requests.get(url, headers={"User-Agent": SEC_UA}, timeout=20)
+            r.raise_for_status()
+            return (f["filingDate"], f["accessionNumber"], parse_ownership_xml(r.text))
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = [x for x in pool.map(one, picks) if x]
+    if not results:
+        return {}
+    total, owners = total_insider_shares(results)
+    return {"shares": total, "owners": owners, "latest": max(r[0] for r in results), "filings": len(results)}
+
+
 def build_card(ticker, res, info, splits, extras):
     last, prev = res[-1], res[-2]
     change = (last["c"] - prev["c"]) / prev["c"] * 100
@@ -880,6 +964,14 @@ def build_card(ticker, res, info, splits, extras):
 
     # Float and short interest (loaded in a second step)
     own = (extras or {}).get("own") or {}
+    ins = (extras or {}).get("insider") or {}
+    insider_note = ""
+    if ins.get("shares") is not None and shares:
+        insider_txt = f"{min(ins['shares'] / shares * 100, 100):.1f}%"
+        insider_note = (f'<div class="note">Insider Own = shares held by {ins["owners"]} insider{"s" if ins["owners"] != 1 else ""} in their latest SEC Form 3/4/5 reports '
+                        f'(through {html.escape(ins["latest"])}) ÷ shares outstanding.</div>')
+    else:
+        insider_txt = None
     if extras is None:
         float_txt = short_txt = "…"
         own = {"inst": "…", "insider": "…"}
@@ -894,13 +986,15 @@ def build_card(ticker, res, info, splits, extras):
         else:
             short_txt = "N/A"
 
+    if insider_txt is None:
+        insider_txt = own.get("insider", "N/A")
     stats = [
         ("Prev Close", f"${prev['c']:.2f}"),
         ("Market Cap", short(d.get("market_cap"))),
         ("Float", float_txt),
         ("OS", short(shares)),
         ("Inst. Own", own.get("inst", "N/A")),
-        ("Insider Own", own.get("insider", "N/A")),
+        ("Insider Own", insider_txt),
         ("Short Interest", short_txt),
         ("Vol Avg.", short(sum(b["v"] for b in recent) / len(recent))),
     ]
@@ -939,7 +1033,7 @@ def build_card(ticker, res, info, splits, extras):
         f'<div class="mute">{html.escape(exch)}{country_txt}</div>'
         f'{flags_html(d, extras)}</div>'
         f'<p class="desc">{html.escape(d.get("description", "")[:220])}</p><hr>'
-        f'<div class="grid">{cells}</div><hr>'
+        f'<div class="grid">{cells}</div>{insider_note}<hr>'
         f'<div class="sec">Dilution &amp; Risk Ratings</div>{risk_html(extras)}<hr>'
         f'{dilution_html(extras)}<hr>'
         f'<div class="sec">Gap Analysis · {direction}</div>{gap_html}<hr>'
@@ -977,6 +1071,7 @@ if ticker:
             extras["risk"] = risk_metrics(ticker, extras["cash"], splits)
             extras["dilution"] = dilution_panel(ticker, extras["cash"], extras["risk"], splits)
             extras["own"] = finviz_own(ticker)
+            extras["insider"] = insider_holdings(ticker)
             extras["country"] = sec_country(ticker)
             extras["flags"] = reg_flags(ticker, (info or {}).get("results", {}).get("primary_exchange"))
         box.markdown(build_card(ticker, res, info, splits, extras), unsafe_allow_html=True)
