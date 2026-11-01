@@ -980,6 +980,9 @@ def build_card(ticker, res, info, splits, extras):
         fl = first(extras.get("float")).get("free_float")
         si = first(extras.get("short")).get("short_interest")
         float_txt = short(fl) if fl else "N/A"
+        if fl:  # red below 8M and above 20M, green from 8M to 20M
+            color = "down" if fl < 8_000_000 or fl > 20_000_000 else "up"
+            float_txt = f'<span class="{color}">{float_txt}</span>'
         if si is not None and fl:
             short_txt = f"{si / fl * 100:.1f}%"
         elif si is not None:
