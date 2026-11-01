@@ -992,8 +992,12 @@ def build_card(ticker, res, info, splits, extras):
 
     if insider_txt is None:
         insider_txt = own.get("insider", "N/A")
+    mc = d.get("market_cap")
+    mcap_txt = short(mc)
+    if mc:  # red below 15M and above 100M, green from 15M to 100M
+        mcap_txt = f'<span class="{"down" if mc < 15_000_000 or mc > 100_000_000 else "up"}">{mcap_txt}</span>'
     stats = [  # two columns, filled row by row: left = Market Cap, OS, Insider Own, Vol Avg; right = Prev Close, Float, Inst. Own, Short Interest
-        ("Market Cap", short(d.get("market_cap"))),
+        ("Market Cap", mcap_txt),
         ("Prev Close", f"${prev['c']:.2f}"),
         ("OS", short(shares)),
         ("Float", float_txt),
