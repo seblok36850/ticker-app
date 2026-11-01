@@ -992,6 +992,14 @@ def build_card(ticker, res, info, splits, extras):
 
     if insider_txt is None:
         insider_txt = own.get("insider", "N/A")
+    inst_txt = own.get("inst", "N/A")
+    try:  # red from 60% up, green 30% to under 60%, pink 10% to under 30%, unchanged below 10%
+        iv = float(str(inst_txt).replace("%", "").replace(",", ""))
+        col = "#ff3b3b" if iv >= 60 else ("#22e05a" if iv >= 30 else ("#ff7ac8" if iv >= 10 else None))
+        if col:
+            inst_txt = f'<span style="color:{col}">{inst_txt}</span>'
+    except ValueError:
+        pass
     mc = d.get("market_cap")
     mcap_txt = short(mc)
     if mc:  # red below 15M and above 100M, green from 15M to 100M
@@ -1002,7 +1010,7 @@ def build_card(ticker, res, info, splits, extras):
         ("OS", short(shares)),
         ("Float", float_txt),
         ("Insider Own", insider_txt),
-        ("Inst. Own", own.get("inst", "N/A")),
+        ("Inst. Own", inst_txt),
         ("Vol Avg.", short(sum(b["v"] for b in recent) / len(recent))),
         ("Short Interest", short_txt),
     ]
