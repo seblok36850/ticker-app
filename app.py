@@ -989,17 +989,18 @@ def build_card(ticker, res, info, splits, extras):
 
     if insider_txt is None:
         insider_txt = own.get("insider", "N/A")
-    stats = [
-        ("Prev Close", f"${prev['c']:.2f}"),
+    stats = [  # two columns, filled row by row: left = Market Cap, OS, Insider Own, Vol Avg; right = Prev Close, Float, Inst. Own, Short Interest
         ("Market Cap", short(d.get("market_cap"))),
-        ("Float", float_txt),
+        ("Prev Close", f"${prev['c']:.2f}"),
         ("OS", short(shares)),
-        ("Inst. Own", own.get("inst", "N/A")),
+        ("Float", float_txt),
         ("Insider Own", insider_txt),
-        ("Short Interest", short_txt),
+        ("Inst. Own", own.get("inst", "N/A")),
         ("Vol Avg.", short(sum(b["v"] for b in recent) / len(recent))),
+        ("Short Interest", short_txt),
     ]
-    cells = "".join(f"<div><small>{k}</small><b>{v}</b></div>" for k, v in stats)
+    logo_cell = f'<div style="grid-column:1;grid-row:1 / span 4;display:flex;align-items:center;justify-content:center"><img src="{LOGO}" alt="Stelyn Holdings" style="width:100%;height:100%;object-fit:contain"></div>'
+    cells = logo_cell + "".join(f"<div><small>{k}</small><b>{v}</b></div>" for k, v in stats)
 
     # Gap analysis
     direction = "Gap Up" if up else "Gap Down"
@@ -1027,14 +1028,13 @@ def build_card(ticker, res, info, splits, extras):
     return (
         f'<div class="card"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">'
         f'<h1 style="margin:0;min-width:0">{ticker} - ${last["c"]:.2f} <span class="{cls}">({change:+.2f}%)</span></h1>'
-        f'<img src="{LOGO}" alt="Stelyn Holdings" style="height:clamp(58px,16vw,105px);width:auto;flex:none;margin:0 auto">'
         f'<div class="mute" style="text-align:right;white-space:nowrap;font-size:13px;line-height:1.35;font-weight:700">{stamp_date}<br>{stamp_time}</div></div>'
         f'<div class="mute">{html.escape(d.get("name", ""))}</div>'
         f'<div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:2px 12px">'
         f'<div class="mute">{html.escape(exch)}{country_txt}</div>'
         f'{flags_html(d, extras)}</div>'
         f'<p class="desc">{html.escape(d.get("description", "")[:220])}</p><hr>'
-        f'<div class="grid">{cells}</div>{insider_note}<hr>'
+        f'<div class="grid" style="grid-template-columns:clamp(90px,30%,180px) 1fr 1fr">{cells}</div>{insider_note}<hr>'
         f'<div class="sec">Dilution &amp; Risk Ratings</div>{risk_html(extras)}<hr>'
         f'{dilution_html(extras)}<hr>'
         f'<div class="sec">Gap Analysis · {direction}</div>{gap_html}<hr>'
