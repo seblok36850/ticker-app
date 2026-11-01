@@ -994,6 +994,12 @@ def build_card(ticker, res, info, splits, extras):
 
     if insider_txt is None:
         insider_txt = own.get("insider", "N/A")
+    try:  # green below 21%, pink 21% to 40%, red above 40%
+        ip = float(str(insider_txt).replace("%", "").replace(",", ""))
+        ic = "#22e05a" if ip < 21 else ("#ff7ac8" if ip <= 40 else "#ff3b3b")
+        insider_txt = f'<span style="color:{ic}">{insider_txt}</span>'
+    except ValueError:
+        pass
     inst_txt = own.get("inst", "N/A")
     try:  # red from 60% up, green 30% to under 60%, pink 10% to under 30%, unchanged below 10%
         iv = float(str(inst_txt).replace("%", "").replace(",", ""))
