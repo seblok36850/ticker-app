@@ -477,8 +477,8 @@ def flags_html(d, extras):
     def cell(label, value, warn=True):
         if value is None:
             return f'{label}: <span class="mute">N/A</span>'
-        if not warn:  # ADR is informational, not a warning
-            return f'{label}: <span class="mute">{value}</span>'
+        if not warn:  # ADR: only a "Yes" is highlighted (red); "No" stays neutral
+            return f'{label}: <span class="{"down" if value == "Yes" else "mute"}">{value}</span>'
         return f'{label}: <span class="{"down" if value == "Yes" else "up"}">{value}</span>'
 
     typ = d.get("type")
