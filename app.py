@@ -999,7 +999,7 @@ def build_card(ticker, res, info, splits, extras):
         ("Vol Avg.", short(sum(b["v"] for b in recent) / len(recent))),
         ("Short Interest", short_txt),
     ]
-    logo_cell = f'<div style="grid-column:1;grid-row:1 / span 4;display:flex;align-items:center;justify-content:center"><img src="{LOGO}" alt="Stelyn Holdings" style="width:100%;height:100%;object-fit:contain"></div>'
+    logo_cell = f'<div style="grid-column:3;grid-row:1 / span 4;display:flex;align-items:center;justify-content:center"><img src="{LOGO}" alt="Stelyn Holdings" style="width:100%;height:100%;object-fit:contain"></div>'
     cells = logo_cell + "".join(f"<div><small>{k}</small><b>{v}</b></div>" for k, v in stats)
 
     # Gap analysis
@@ -1034,7 +1034,7 @@ def build_card(ticker, res, info, splits, extras):
         f'<div class="mute">{html.escape(exch)}{country_txt}</div>'
         f'{flags_html(d, extras)}</div>'
         f'<p class="desc">{html.escape(d.get("description", "")[:220])}</p><hr>'
-        f'<div class="grid" style="grid-template-columns:clamp(90px,30%,180px) 1fr 1fr">{cells}</div>{insider_note}<hr>'
+        f'<div class="grid" style="grid-template-columns:1fr 1fr clamp(90px,30%,180px)">{cells}</div>{insider_note}<hr>'
         f'<div class="sec">Dilution &amp; Risk Ratings</div>{risk_html(extras)}<hr>'
         f'{dilution_html(extras)}<hr>'
         f'<div class="sec">Gap Analysis · {direction}</div>{gap_html}<hr>'
