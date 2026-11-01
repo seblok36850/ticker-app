@@ -960,7 +960,10 @@ def build_card(ticker, res, info, splits, extras):
     exch = EXCHANGES.get(d.get("primary_exchange"), d.get("primary_exchange", ""))
     stamp_date, stamp_time = et_now()
     country = (extras or {}).get("country")
-    country_txt = f" &nbsp;•&nbsp; {html.escape(country)}" if country else ""
+    country_txt = ""
+    if country:
+        red = ' class="down"' if country.strip().lower() == "china" else ""
+        country_txt = f" &nbsp;•&nbsp; <span{red}>{html.escape(country)}</span>"
     shares = d.get("share_class_shares_outstanding") or d.get("weighted_shares_outstanding")
 
     # Float and short interest (loaded in a second step)
