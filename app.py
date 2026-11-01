@@ -984,7 +984,9 @@ def build_card(ticker, res, info, splits, extras):
             color = "down" if fl < 8_000_000 or fl > 20_000_000 else "up"
             float_txt = f'<span class="{color}">{float_txt}</span>'
         if si is not None and fl:
-            short_txt = f"{si / fl * 100:.1f}%"
+            sp = si / fl * 100  # green below 21%, pink 21% to 30%, red above 30%
+            sc = "#22e05a" if sp < 21 else ("#ff7ac8" if sp <= 30 else "#ff3b3b")
+            short_txt = f'<span style="color:{sc}">{sp:.1f}%</span>'
         elif si is not None:
             short_txt = f"{short(si)} sh"
         else:
