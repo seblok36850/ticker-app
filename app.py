@@ -1008,6 +1008,10 @@ def build_card(ticker, res, info, splits, extras):
             inst_txt = f'<span style="color:{col}">{inst_txt}</span>'
     except ValueError:
         pass
+    os_txt = short(shares)
+    if shares:  # red below 5M, pink 5M to under 20M, green 20M to 75M, pink above 75M
+        oc = "#ff3b3b" if shares < 5_000_000 else ("#ff7ac8" if shares < 20_000_000 or shares > 75_000_000 else "#22e05a")
+        os_txt = f'<span style="color:{oc}">{os_txt}</span>'
     mc = d.get("market_cap")
     mcap_txt = short(mc)
     if mc:  # red below 15M and above 100M, green from 15M to 100M
@@ -1015,7 +1019,7 @@ def build_card(ticker, res, info, splits, extras):
     stats = [  # two columns, filled row by row: left = Market Cap, OS, Insider Own, Vol Avg; right = Prev Close, Float, Inst. Own, Short Interest
         ("Market Cap", mcap_txt),
         ("Prev Close", f"${prev['c']:.2f}"),
-        ("OS", short(shares)),
+        ("OS", os_txt),
         ("Float", float_txt),
         ("Insider Own", insider_txt),
         ("Inst. Own", inst_txt),
