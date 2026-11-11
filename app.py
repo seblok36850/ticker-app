@@ -1019,11 +1019,11 @@ def build_card(ticker, res, info, splits, extras):
     mcap_txt = short(mc)
     if mc:  # red below 15M and above 100M, green from 15M to 100M
         mcap_txt = f'<span class="{"down" if mc < 15_000_000 or mc > 100_000_000 else "up"}">{mcap_txt}</span>'
-    stats = [  # two columns, filled row by row: left = Market Cap, OS, Insider Own, Vol Avg; right = Prev Close, Float, Inst. Own, Short Interest
+    stats = [  # two columns, filled row by row: left = Market Cap, OS, Insider Own, Vol Avg; right = Float, Prev Close, Inst. Own, Short Interest
         ("Market Cap", mcap_txt),
-        ("Prev Close", f"${prev['c']:.2f}"),
-        ("OS", os_txt),
         ("Float", float_txt),
+        ("OS", os_txt),
+        ("Prev Close", f"${prev['c']:.2f}"),
         ("Insider Own", insider_txt),
         ("Inst. Own", inst_txt),
         ("Vol Avg.", short(sum(b["v"] for b in recent) / len(recent))),
