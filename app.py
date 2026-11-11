@@ -1087,11 +1087,34 @@ def build_card(ticker, res, info, splits, extras):
     )
 
 
-ticker = st.text_input("Ticker", value="AMOD", max_chars=6).strip().upper()
+PICK = "Choose a recent ticker…"
+st.session_state.setdefault("ticker_input", "AMOD")
+st.session_state.setdefault("recent", [])
+st.session_state.setdefault("recent_pick", PICK)
 
+
+def use_recent():
+    """Called when a ticker is chosen from the dropdown: put it in the text box and reset the dropdown."""
+    choice = st.session_state.recent_pick
+    if choice != PICK:
+        st.session_state.ticker_input = choice
+    st.session_state.recent_pick = PICK
+
+
+left, right = st.columns(2)
+with left:
+    ticker = st.text_input("Ticker", key="ticker_input", max_chars=6).strip().upper()
+
+bars = None
 if ticker:
     start = date.today() - timedelta(days=LOOKBACK_DAYS)
     bars = get(f"/v2/aggs/ticker/{ticker}/range/1/day/{start}/{date.today()}?adjusted=true&sort=asc&limit=5000")
+    if bars and bars.get("results") and len(bars["results"]) >= 2:  # remember only tickers that returned data; keep the last 10
+        st.session_state.recent = ([ticker] + [t for t in st.session_state.recent if t != ticker])[:10]
+with right:
+    st.selectbox("Recent tickers", [PICK] + st.session_state.recent, key="recent_pick", on_change=use_recent)
+
+if ticker:
     info = get(f"/v3/reference/tickers/{ticker}")
     splits = get_splits(ticker)
 
