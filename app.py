@@ -1036,7 +1036,7 @@ def build_card(ticker, res, info, splits, extras):
         'INVESTING IN TODAY<br>FOR A BRIGHTER TOMORROW</div></div>'
     )
     notes = {"Float": ("8M to 20M Shares", 44), "Market Cap": ("$15M to $100M", 82),
-             "OS": ("20M to 75M Shares", 30), "Insider Own": ("0% to 21%", 88), "Inst. Own": ("30% to 60%", 70)}  # label: (note text, popup offset in px)
+             "OS": ("20M to 75M Shares", 30), "Insider Own": ("0% to 21%", 88), "Inst. Own": ("30% to 60%", 70), "Short Interest": ("21% to 30%", 100)}  # label: (note text, popup offset in px)
 
     def label_html(k):
         if k not in notes:
