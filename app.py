@@ -1035,13 +1035,20 @@ def build_card(ticker, res, info, splits, extras):
         '<div style="text-align:center;font-weight:600;letter-spacing:.12em;line-height:1.3;color:#f1f3f6;font-size:clamp(9px,2.3vw,13px);margin-top:6px;text-wrap:balance">'
         'INVESTING IN TODAY<br>FOR A BRIGHTER TOMORROW</div></div>'
     )
-    float_label = (
-        '<details style="position:relative"><summary style="cursor:pointer;list-style:none;display:block" title="8M to 20M Shares">'
-        '<small style="color:#6db3f2;text-decoration:underline;display:inline">Float</small></summary>'
-        '<div style="position:absolute;z-index:5;left:44px;top:-4px;background:#2a2e36;border:1px solid #3a4150;border-radius:6px;padding:4px 8px;font-size:12px;white-space:nowrap;color:#f1f3f6">'
-        '8M to 20M Shares</div></details>'
-    )
-    cells = logo_cell + "".join(f"<div>{float_label if k == 'Float' else f'<small>{k}</small>'}<b>{v}</b></div>" for k, v in stats)
+    notes = {"Float": ("8M to 20M Shares", 44), "Market Cap": ("$15M to $100M", 82)}  # label: (note text, popup offset in px)
+
+    def label_html(k):
+        if k not in notes:
+            return f"<small>{k}</small>"
+        text, off = notes[k]
+        return (
+            f'<details style="position:relative"><summary style="cursor:pointer;list-style:none;display:block" title="{text}">'
+            f'<small style="color:#6db3f2;text-decoration:underline;display:inline">{k}</small></summary>'
+            f'<div style="position:absolute;z-index:5;left:{off}px;top:-4px;background:#2a2e36;border:1px solid #3a4150;border-radius:6px;padding:4px 8px;'
+            f'font-size:12px;white-space:nowrap;color:#f1f3f6">{text}</div></details>'
+        )
+
+    cells = logo_cell + "".join(f"<div>{label_html(k)}<b>{v}</b></div>" for k, v in stats)
 
     # Gap analysis
     direction = "Gap Up" if up else "Gap Down"
